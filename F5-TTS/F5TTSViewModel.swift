@@ -12,10 +12,22 @@ import SwiftUI
 import Speech
 import UniformTypeIdentifiers
 
+// First, modify AudioHistoryItem to store relative paths instead of URLs
+struct AudioHistoryItem: Identifiable, Codable {
+    var id: UUID = UUID()
+    var title: String
+    var audioFileName: String  // Store filename instead of URL
+    
+    enum CodingKeys: String, CodingKey {
+        case id, title, audioFileName
+    }
+}
+    
 class F5TTSViewModel: ObservableObject {
     @Published var inputText: String = ""
     @Published var isGenerating: Bool = false
     @Published var generatedAudioURL: URL?
+    @Published var audioHistory: [AudioHistoryItem] = []
 
     private var isTapInstalled = false
     private var outputPath: URL
@@ -26,12 +38,17 @@ class F5TTSViewModel: ObservableObject {
     private var recognitionTask: SFSpeechRecognitionTask?
     
     private var isRecordingInProgress = false
+    
+    private func getUniqueFileName() -> String {
+        return "audio_\(UUID().uuidString).wav"
+    }
 
     init() {
         // Create a unique file path for each audio generation
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         outputPath = documentsPath.appendingPathComponent("generatedAudio_\(UUID().uuidString).wav")
         speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        loadAudioHistory() // Load previous audios on startup
     }
 
     func requestPermissions() {
@@ -202,9 +219,7 @@ class F5TTSViewModel: ObservableObject {
             print("Failed to deactivate audio session: \(error)")
         }
     }
-
-
-
+    
     func generateSpeech() {
         guard let f5tts = self.f5tts else {
             print("F5TTS not initialized.")
@@ -217,14 +232,16 @@ class F5TTSViewModel: ObservableObject {
             do {
                 let startTime = Date()
                 let generatedAudio = try await f5tts.generate(text: self.inputText)
-                
+
                 let elapsedTime = Date().timeIntervalSince(startTime)
                 print("Generated \(Double(generatedAudio.shape[0]) / Double(F5TTS.sampleRate)) seconds of audio in \(elapsedTime) seconds.")
-                
+
                 try AudioUtilities.saveAudioFile(url: outputPath, samples: generatedAudio)
                 print("Saved audio to: \(outputPath)")
-    
+
+                // Save the generated audio to history
                 DispatchQueue.main.async {
+                    self.saveAudioToHistory()
                     self.generatedAudioURL = self.outputPath
                     self.isGenerating = false
                 }
@@ -236,4 +253,53 @@ class F5TTSViewModel: ObservableObject {
             }
         }
     }
+
+    // Save audio to history
+    func saveAudioToHistory() {
+        let fileName = getUniqueFileName()
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let destinationURL = documentsPath.appendingPathComponent(fileName)
+        
+        // Copy the generated audio to the permanent location
+        do {
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(at: destinationURL)
+            }
+            try FileManager.default.copyItem(at: outputPath, to: destinationURL)
+            
+            let historyItem = AudioHistoryItem(title: inputText, audioFileName: fileName)
+            audioHistory.append(historyItem)
+            saveAudioHistory()
+        } catch {
+            print("Failed to save audio file: \(error)")
+        }
+    }
+    
+    // Update loading to verify files exist
+    func loadAudioHistory() {
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let historyFileURL = documentsPath.appendingPathComponent("audioHistory.json")
+        
+        if let data = try? Data(contentsOf: historyFileURL),
+           let savedHistory = try? JSONDecoder().decode([AudioHistoryItem].self, from: data) {
+            
+            // Filter out items whose audio files no longer exist
+            audioHistory = savedHistory.filter { item in
+                let audioURL = documentsPath.appendingPathComponent(item.audioFileName)
+                return FileManager.default.fileExists(atPath: audioURL.path)
+            }
+        }
+    }
+
+    // Save audio history to disk
+    func saveAudioHistory() {
+        let fileManager = FileManager.default
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let historyFileURL = documentsPath.appendingPathComponent("audioHistory.json")
+
+        if let data = try? JSONEncoder().encode(audioHistory) {
+            try? data.write(to: historyFileURL)
+        }
+    }
+    
 }
