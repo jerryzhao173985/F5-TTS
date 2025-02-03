@@ -1,15 +1,10 @@
 import Foundation
 import F5TTS
-
 import MLX
 import Vocos
-
 import AVFoundation
 import Speech
-
 import SwiftUI
-
-import Speech
 import UniformTypeIdentifiers
 
 // First, modify AudioHistoryItem to store relative paths instead of URLs
@@ -28,7 +23,16 @@ class F5TTSViewModel: ObservableObject {
     @Published var isGenerating: Bool = false
     @Published var generatedAudioURL: URL?
     @Published var audioHistory: [AudioHistoryItem] = []
-
+    
+    // New properties for reference audio and recording state
+    @Published var referenceAudioURL: URL?
+    @Published var referenceAudioText: String?
+    @Published var isReferenceRecording: Bool = false
+    
+    // Private properties for managing reference audio recording
+    private var referenceAudioRecorder: AVAudioRecorder?
+    private var referenceRecordingURL: URL?
+    
     private var isTapInstalled = false
     private var outputPath: URL
     private var f5tts: F5TTS?
@@ -38,11 +42,6 @@ class F5TTSViewModel: ObservableObject {
     private var recognitionTask: SFSpeechRecognitionTask?
     
     private var isRecordingInProgress = false
-    
-    // New properties for reference audio
-    var referenceAudioURL: URL?
-    var referenceAudioText: String?
-
     
     private func getUniqueFileName() -> String {
         return "audio_\(UUID().uuidString).wav"
@@ -99,7 +98,6 @@ class F5TTSViewModel: ObservableObject {
         }
     }
     
-
     func startRecording(completion: @escaping (Bool, String) -> Void) {
         guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else {
             completion(false, "Speech recognition is not available")
@@ -187,12 +185,7 @@ class F5TTSViewModel: ObservableObject {
                     DispatchQueue.main.async {
                         // Update inputText gradually with the latest transcription
                         let newTranscription = result.bestTranscription.formattedString
-                        self.inputText = newTranscription // Always update with the latest transcription
-
-                        // Optional: To avoid appending duplicates (if needed)
-                        // if newTranscription != self.inputText {
-                        //     self.inputText += newTranscription
-                        // }
+                        self.inputText = newTranscription
                     }
                 }
             }
@@ -205,27 +198,99 @@ class F5TTSViewModel: ObservableObject {
     
     func stopRecording() {
         audioEngine.stop()
-
-        // Only clear the input text if you want to start a new recording session.
-        // Do not clear text unless the user explicitly decides to clear or start over.
-        
-        // This flag indicates that we are finishing the current recording session.
-        // You can decide to reset or save the text based on your desired flow.
+        // Optionally clear or preserve the input text based on your desired flow.
         if !isRecordingInProgress {
-            // If needed, you can reset the text here, but currently, we just preserve it.
-            // inputText = "" // Uncomment to reset text when stopping after the second session
+            // inputText = "" // Uncomment if you want to reset text
         }
-
-        // Toggle the recording state
         isRecordingInProgress.toggle()
-        
-        // Reset audio session
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         } catch {
             print("Failed to deactivate audio session: \(error)")
         }
     }
+    
+    // MARK: - Reference Audio Recording Methods
+
+    /// Starts recording the user's voice for reference audio using AVAudioRecorder.
+    func startReferenceRecording(completion: @escaping (Bool, String) -> Void) {
+        // Set up and activate the audio session for recording.
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.record, mode: .default, options: [])
+            try session.setActive(true)
+        } catch {
+            completion(false, "Could not set up audio session for reference recording: \(error.localizedDescription)")
+            return
+        }
+        
+        // Create a unique file URL in the documents directory.
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let fileURL = documentsPath.appendingPathComponent("referenceRecording_\(UUID().uuidString).wav")
+        referenceRecordingURL = fileURL
+
+        // Define the recording settings.
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 24000,       // Use 24kHz instead of 44100
+            AVNumberOfChannelsKey: 1,     // Mono
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false
+        ]
+        
+        do {
+            referenceAudioRecorder = try AVAudioRecorder(url: fileURL, settings: settings)
+            referenceAudioRecorder?.record()
+            isReferenceRecording = true
+            print("Started reference recording at \(fileURL.path)")
+            completion(true, "Reference recording started successfully")
+        } catch {
+            completion(false, "Failed to start reference recording: \(error.localizedDescription)")
+        }
+    }
+
+    /// Stops the reference audio recording and transcribes the recorded audio.
+    func stopReferenceRecording(completion: @escaping (Bool, String) -> Void) {
+        guard let recorder = referenceAudioRecorder, isReferenceRecording else {
+            completion(false, "No reference recording in progress")
+            return
+        }
+        recorder.stop()
+        isReferenceRecording = false
+        
+        guard let fileURL = referenceRecordingURL else {
+            completion(false, "Reference recording file URL not found")
+            return
+        }
+        
+        print("Stopped reference recording, file saved at \(fileURL.path)")
+        self.referenceAudioURL = fileURL
+        // Transcribe the recorded reference audio.
+        // In your stopReferenceRecording(...) method’s completion block:
+        self.transcribeAudioFile(url: fileURL) { transcription in
+            DispatchQueue.main.async {
+                if transcription.isEmpty {
+                    completion(false, "No speech detected in your recording. Please try again.")
+                } else {
+                    self.referenceAudioText = transcription
+                    // Validate (and convert) the recorded audio.
+                    self.validateAndConvertReferenceAudio(url: fileURL) { result in
+                        DispatchQueue.main.async {
+                            switch result {
+                            case .success(let convertedURL):
+                                self.referenceAudioURL = convertedURL
+                                completion(true, "Your own voice will be used to generate speech for the text you provided.")
+                            case .failure(let error):
+                                completion(false, error.localizedDescription)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     
     // Modified generateSpeech to accept the reference audio parameters.
     func generateSpeech() {
@@ -241,26 +306,16 @@ class F5TTSViewModel: ObservableObject {
                 let startTime = Date()
                 let generatedAudio: MLXArray
                 
-                // If there is a reference audio file and a transcription available...
                 if let refURL = referenceAudioURL,
-                   let refText = referenceAudioText, !refText.isEmpty {
-                   
-                    // Re-open the security scope for the reference file.
-                    if refURL.startAccessingSecurityScopedResource() {
-                        defer { refURL.stopAccessingSecurityScopedResource() }
-                        
-                        generatedAudio = try await f5tts.generate(
-                            text: self.inputText,
-                            referenceAudioURL: refURL,
-                            referenceAudioText: refText
-                        )
-                    } else {
-                        // If reopening fails, log and fall back to generation without reference.
-                        print("Unable to access reference audio file security scope.")
-                        generatedAudio = try await f5tts.generate(text: self.inputText)
-                    }
+                   let refText = referenceAudioText,
+                   !refText.isEmpty {
+                    // Since our reference audio is now stored locally in Documents, use it directly.
+                    generatedAudio = try await f5tts.generate(
+                        text: self.inputText,
+                        referenceAudioURL: refURL,
+                        referenceAudioText: refText
+                    )
                 } else {
-                    // No reference file; generate using only input text.
                     generatedAudio = try await f5tts.generate(text: self.inputText)
                 }
                 
@@ -291,7 +346,6 @@ class F5TTSViewModel: ObservableObject {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let destinationURL = documentsPath.appendingPathComponent(fileName)
         
-        // Copy the generated audio to the permanent location
         do {
             if FileManager.default.fileExists(atPath: destinationURL.path) {
                 try FileManager.default.removeItem(at: destinationURL)
@@ -314,7 +368,6 @@ class F5TTSViewModel: ObservableObject {
         if let data = try? Data(contentsOf: historyFileURL),
            let savedHistory = try? JSONDecoder().decode([AudioHistoryItem].self, from: data) {
             
-            // Filter out items whose audio files no longer exist
             audioHistory = savedHistory.filter { item in
                 let audioURL = documentsPath.appendingPathComponent(item.audioFileName)
                 return FileManager.default.fileExists(atPath: audioURL.path)
@@ -324,7 +377,6 @@ class F5TTSViewModel: ObservableObject {
 
     // Save audio history to disk
     func saveAudioHistory() {
-        let fileManager = FileManager.default
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let historyFileURL = documentsPath.appendingPathComponent("audioHistory.json")
 
@@ -333,7 +385,7 @@ class F5TTSViewModel: ObservableObject {
         }
     }
     
-    // Simplified transcription function (no iCloud or security-scoped code)
+    // Simplified transcription function
     func transcribeAudioFile(url: URL, completion: @escaping (String) -> Void) {
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {
             print("Speech recognizer not available")
@@ -347,11 +399,9 @@ class F5TTSViewModel: ObservableObject {
                 completion("")
                 return
             }
-            if let result = result {
+            if let result = result, result.isFinal {
                 let transcription = result.bestTranscription.formattedString
                 completion(transcription)
-            } else {
-                completion("")
             }
         }
     }

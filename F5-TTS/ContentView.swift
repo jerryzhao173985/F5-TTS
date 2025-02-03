@@ -85,7 +85,7 @@ struct ContentView: View {
                             }
                         }
                         
-                        // Start/Stop Recording Button
+                        // Start/Stop Recording Button for the main prompt
                         Button(action: {
                             if isRecording {
                                 viewModel.stopRecording()
@@ -109,12 +109,13 @@ struct ContentView: View {
                     }
                     .padding(.horizontal)
                     
-                    // Row with "Upload Reference Audio File" button
+                    // Row with "Upload Reference" and "Record Your Own Voice" buttons
                     HStack {
+                        // Upload Reference Button (renamed from "Upload Reference Audio File")
                         Button {
                             showingReferenceAudioPicker = true
                         } label: {
-                            Label("Upload Reference Audio File", systemImage: "waveform")
+                            Label("Upload Reference", systemImage: "waveform")
                         }
                         .fileImporter(
                             isPresented: $showingReferenceAudioPicker,
@@ -125,20 +126,63 @@ struct ContentView: View {
                             case .success(let urls):
                                 guard let url = urls.first else { return }
                                 if url.startAccessingSecurityScopedResource() {
-                                    viewModel.referenceAudioURL = url
-                                    viewModel.transcribeAudioFile(url: url) { transcription in
-                                        viewModel.referenceAudioText = transcription
-                                        url.stopAccessingSecurityScopedResource()
+                                    if let localURL = viewModel.copyImportedFileToDocuments(from: url) {
+                                        viewModel.transcribeAudioFile(url: localURL) { transcription in
+                                            viewModel.referenceAudioText = transcription
+                                            viewModel.validateAndConvertReferenceAudio(url: localURL) { result in
+                                                DispatchQueue.main.async {
+                                                    switch result {
+                                                    case .success(let convertedURL):
+                                                        viewModel.referenceAudioURL = convertedURL
+                                                        print("Reference audio validated and converted: \(convertedURL.path)")
+                                                    case .failure(let error):
+                                                        print("Error processing reference audio: \(error.localizedDescription)")
+                                                        // Optionally show an alert.
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        alertMessage = "Could not copy reference audio file to app directory."
+                                        showAlert = true
                                     }
+                                    url.stopAccessingSecurityScopedResource()
                                 } else {
                                     alertMessage = "Permission denied for file."
                                     showAlert = true
                                 }
-                                
                             case .failure(let error):
                                 alertMessage = "Error importing reference audio: \(error.localizedDescription)"
                                 showAlert = true
                             }
+                        }
+                        
+                        
+                        
+                        // Record Your Own Voice Button for reference audio
+                        Button(action: {
+                            if viewModel.isReferenceRecording {
+                                // Stop the reference recording
+                                viewModel.stopReferenceRecording { success, message in
+                                    alertMessage = message
+                                    showAlert = true
+                                }
+                            } else {
+                                // Start the reference recording
+                                viewModel.startReferenceRecording { success, message in
+                                    if !success {
+                                        alertMessage = message
+                                        showAlert = true
+                                    }
+                                }
+                            }
+                        }) {
+                            Label(
+                                viewModel.isReferenceRecording ?
+                                    "Stop Recording Your Own Voice" :
+                                    "Record Your Own Voice",
+                                systemImage: viewModel.isReferenceRecording ? "stop.circle" : "mic.circle"
+                            )
                         }
                         Spacer()
                     }
@@ -287,4 +331,3 @@ extension UIApplication {
         self.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
-
