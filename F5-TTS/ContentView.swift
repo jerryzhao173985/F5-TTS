@@ -8,11 +8,10 @@ struct ContentView: View {
     @StateObject private var viewModel = F5TTSViewModel()
     @StateObject private var audioHistoryManager = AudioHistoryManager()
     
-    @State private var isPlayingAudio: Bool = false
-    @State private var audioToPlay: URL?
-    @State private var audioToDisplay: String = ""
+    // State for file importers
+    @State private var showingTextFileImporter = false
+    @State private var showingReferenceAudioPicker = false
     
-    @State private var showingFileImporter = false
     @State private var isRecording = false
     @State private var showAlert = false
     @State private var alertMessage = ""
@@ -30,6 +29,7 @@ struct ContentView: View {
                     }
                 VStack(spacing: 20) {
                     
+                    // TextEditor for user prompt input
                     TextEditor(text: $viewModel.inputText)
                         .focused($inputTextFieldIsFocused)
                         .padding()
@@ -39,8 +39,6 @@ struct ContentView: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .stroke(Color.gray.opacity(0.5), lineWidth: 1)
                         )
-                        .padding(.horizontal)
-                    // Add toolbar with Done button
                         .toolbar {
                             ToolbarItemGroup(placement: .keyboard) {
                                 Spacer()
@@ -49,36 +47,45 @@ struct ContentView: View {
                                 }
                             }
                         }
+                        .padding(.horizontal)
                     
+                    // Row with "Upload Text File" and "Start/Stop Recording" buttons
                     HStack(spacing: 20) {
-                        Button(action: {
-                            showingFileImporter = true
-                        }) {
-                            HStack {
-                                Image(systemName: "doc.text")
-                                Text("Upload Text File")
-                            }
+                        // Upload Text File Button
+                        Button {
+                            showingTextFileImporter = true
+                        } label: {
+                            Label("Upload Text File", systemImage: "doc.text")
                         }
                         .fileImporter(
-                            isPresented: $showingFileImporter,
+                            isPresented: $showingTextFileImporter,
                             allowedContentTypes: [UTType.plainText],
                             allowsMultipleSelection: false
                         ) { result in
                             switch result {
                             case .success(let urls):
-                                guard let selectedFile = urls.first else { return }
-                                viewModel.handleFileImport(url: selectedFile) { success, message in
-                                    if !success {
-                                        alertMessage = message
+                                guard let url = urls.first else { return }
+                                if url.startAccessingSecurityScopedResource() {
+                                    defer { url.stopAccessingSecurityScopedResource() }
+                                    do {
+                                        let text = try String(contentsOf: url, encoding: .utf8)
+                                        viewModel.inputText = text
+                                    } catch {
+                                        alertMessage = "Error loading text file: \(error.localizedDescription)"
                                         showAlert = true
                                     }
+                                } else {
+                                    alertMessage = "Permission denied for file."
+                                    showAlert = true
                                 }
+                                
                             case .failure(let error):
-                                alertMessage = "Error importing file: \(error.localizedDescription)"
+                                alertMessage = "Error importing text file: \(error.localizedDescription)"
                                 showAlert = true
                             }
-                        } // End of fileImporter
+                        }
                         
+                        // Start/Stop Recording Button
                         Button(action: {
                             if isRecording {
                                 viewModel.stopRecording()
@@ -87,8 +94,7 @@ struct ContentView: View {
                                 viewModel.startRecording { success, message in
                                     if success {
                                         isRecording = true
-                                    }
-                                    else {
+                                    } else {
                                         alertMessage = message
                                         showAlert = true
                                     }
@@ -99,32 +105,66 @@ struct ContentView: View {
                                 Image(systemName: isRecording ? "stop.circle" : "mic.circle")
                                 Text(isRecording ? "Stop Recording" : "Start Recording")
                             }
-                        } // End of Button
-                    } // End of HStack
+                        }
+                    }
                     .padding(.horizontal)
                     
-                    HStack(spacing: 20) {
-                        Button(action: {
-                            viewModel.generateSpeech()
-                        }) {
-                            HStack {
-                                Image(systemName: "play.circle")
-                                Text("Generate Speech")
+                    // Row with "Upload Reference Audio File" button
+                    HStack {
+                        Button {
+                            showingReferenceAudioPicker = true
+                        } label: {
+                            Label("Upload Reference Audio File", systemImage: "waveform")
+                        }
+                        .fileImporter(
+                            isPresented: $showingReferenceAudioPicker,
+                            allowedContentTypes: [UTType.wav],
+                            allowsMultipleSelection: false
+                        ) { result in
+                            switch result {
+                            case .success(let urls):
+                                guard let url = urls.first else { return }
+                                if url.startAccessingSecurityScopedResource() {
+                                    viewModel.referenceAudioURL = url
+                                    viewModel.transcribeAudioFile(url: url) { transcription in
+                                        viewModel.referenceAudioText = transcription
+                                        url.stopAccessingSecurityScopedResource()
+                                    }
+                                } else {
+                                    alertMessage = "Permission denied for file."
+                                    showAlert = true
+                                }
+                                
+                            case .failure(let error):
+                                alertMessage = "Error importing reference audio: \(error.localizedDescription)"
+                                showAlert = true
                             }
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                    
+                    // "Generate Speech" button placed on its own row
+                    Button {
+                        viewModel.generateSpeech()
+                    } label: {
+                        HStack {
+                            Image(systemName: "play.circle")
+                            Text("Generate Speech")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                    }
+                    .disabled(viewModel.inputText.isEmpty || viewModel.isGenerating)
+                    .padding(.horizontal)
+                    
+                    // Show a progress view below the "Generate Speech" button while generating
+                    if viewModel.isGenerating {
+                        ProgressView("Generating Speech...")
                             .padding()
-                            .frame(maxWidth: .infinity)
-                            .background(Color.blue)
-                            .foregroundColor(.white)
-                            .cornerRadius(12)  // Rounded corners for better look
-                            .padding(.horizontal)
-                            .shadow(radius: 5)  // Add shadow for interactivity
-                        }
-                        .disabled(viewModel.inputText.isEmpty || viewModel.isGenerating)
-                        
-                        if viewModel.isGenerating {
-                            ProgressView("Generating Speech...")
-                                .padding()
-                        }
                     }
                     
                     // Audio History List
@@ -145,10 +185,8 @@ struct ContentView: View {
                         }
                     }
                     .frame(maxHeight: 600) // Limit height to make it scrollable
-                    
-                    //                Spacer()
-                } // End of VStack
-            } // End of ZStack
+                }
+            }
             .navigationTitle("F5 TTS App")
             .alert(isPresented: $showAlert) {
                 Alert(
@@ -157,7 +195,7 @@ struct ContentView: View {
                     dismissButton: .default(Text("OK"))
                 )
             }
-        } // End of NavigationView
+        }
         .onAppear {
             viewModel.initializeF5TTS()
             viewModel.requestPermissions()
@@ -165,7 +203,7 @@ struct ContentView: View {
         .onDisappear {
             audioHistoryManager.stopCurrentAudio()
         }
-    } // End of body
+    }
 }
 
 class AudioHistoryManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
@@ -249,3 +287,4 @@ extension UIApplication {
         self.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
+

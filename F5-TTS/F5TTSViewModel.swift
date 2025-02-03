@@ -39,6 +39,11 @@ class F5TTSViewModel: ObservableObject {
     
     private var isRecordingInProgress = false
     
+    // New properties for reference audio
+    var referenceAudioURL: URL?
+    var referenceAudioText: String?
+
+    
     private func getUniqueFileName() -> String {
         return "audio_\(UUID().uuidString).wav"
     }
@@ -73,25 +78,27 @@ class F5TTSViewModel: ObservableObject {
     }
 
     func handleFileImport(url: URL, completion: @escaping (Bool, String) -> Void) {
+        // Request access to the iCloud file
         guard url.startAccessingSecurityScopedResource() else {
             completion(false, "Cannot access the file.")
             return
         }
-        
+
         defer {
-            url.stopAccessingSecurityScopedResource()
+            url.stopAccessingSecurityScopedResource()  // Make sure to stop accessing the file after using it
         }
-        
+
         do {
-            let text = try String(contentsOf: url, encoding: .utf8)
+            let audioData = try Data(contentsOf: url)  // Read the file data
             DispatchQueue.main.async {
-                self.inputText = text
+                self.inputText = String(data: audioData, encoding: .utf8) ?? ""
                 completion(true, "File imported successfully")
             }
         } catch {
             completion(false, "Failed to read file: \(error.localizedDescription)")
         }
     }
+    
 
     func startRecording(completion: @escaping (Bool, String) -> Void) {
         guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else {
@@ -220,26 +227,49 @@ class F5TTSViewModel: ObservableObject {
         }
     }
     
+    // Modified generateSpeech to accept the reference audio parameters.
     func generateSpeech() {
         guard let f5tts = self.f5tts else {
             print("F5TTS not initialized.")
             return
         }
-
+        
         isGenerating = true
-
+        
         Task {
             do {
                 let startTime = Date()
-                let generatedAudio = try await f5tts.generate(text: self.inputText)
-
+                let generatedAudio: MLXArray
+                
+                // If there is a reference audio file and a transcription available...
+                if let refURL = referenceAudioURL,
+                   let refText = referenceAudioText, !refText.isEmpty {
+                   
+                    // Re-open the security scope for the reference file.
+                    if refURL.startAccessingSecurityScopedResource() {
+                        defer { refURL.stopAccessingSecurityScopedResource() }
+                        
+                        generatedAudio = try await f5tts.generate(
+                            text: self.inputText,
+                            referenceAudioURL: refURL,
+                            referenceAudioText: refText
+                        )
+                    } else {
+                        // If reopening fails, log and fall back to generation without reference.
+                        print("Unable to access reference audio file security scope.")
+                        generatedAudio = try await f5tts.generate(text: self.inputText)
+                    }
+                } else {
+                    // No reference file; generate using only input text.
+                    generatedAudio = try await f5tts.generate(text: self.inputText)
+                }
+                
                 let elapsedTime = Date().timeIntervalSince(startTime)
                 print("Generated \(Double(generatedAudio.shape[0]) / Double(F5TTS.sampleRate)) seconds of audio in \(elapsedTime) seconds.")
-
+                
                 try AudioUtilities.saveAudioFile(url: outputPath, samples: generatedAudio)
                 print("Saved audio to: \(outputPath)")
-
-                // Save the generated audio to history
+                
                 DispatchQueue.main.async {
                     self.saveAudioToHistory()
                     self.generatedAudioURL = self.outputPath
@@ -253,6 +283,7 @@ class F5TTSViewModel: ObservableObject {
             }
         }
     }
+
 
     // Save audio to history
     func saveAudioToHistory() {
@@ -299,6 +330,29 @@ class F5TTSViewModel: ObservableObject {
 
         if let data = try? JSONEncoder().encode(audioHistory) {
             try? data.write(to: historyFileURL)
+        }
+    }
+    
+    // Simplified transcription function (no iCloud or security-scoped code)
+    func transcribeAudioFile(url: URL, completion: @escaping (String) -> Void) {
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {
+            print("Speech recognizer not available")
+            completion("")
+            return
+        }
+        let request = SFSpeechURLRecognitionRequest(url: url)
+        recognizer.recognitionTask(with: request) { result, error in
+            if let error = error {
+                print("Error transcribing audio: \(error.localizedDescription)")
+                completion("")
+                return
+            }
+            if let result = result {
+                let transcription = result.bestTranscription.formattedString
+                completion(transcription)
+            } else {
+                completion("")
+            }
         }
     }
     
