@@ -209,6 +209,7 @@ struct ContentView: View {
                     if viewModel.isGenerating {
                         ProgressView("Generating Speech...")
                             .padding()
+                            .allowsHitTesting(false)
                     }
                     
                     // Audio History List
