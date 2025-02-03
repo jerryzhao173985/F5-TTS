@@ -29,6 +29,9 @@ class F5TTSViewModel: ObservableObject {
     @Published var referenceAudioText: String?
     @Published var isReferenceRecording: Bool = false
     
+    // New property to hold progress (0.0 to 1.0)
+    @Published var generationProgress: Double = 0.0
+    
     // Private properties for managing reference audio recording
     private var referenceAudioRecorder: AVAudioRecorder?
     private var referenceRecordingURL: URL?
@@ -258,34 +261,34 @@ class F5TTSViewModel: ObservableObject {
         }
         recorder.stop()
         isReferenceRecording = false
-        
+
         guard let fileURL = referenceRecordingURL else {
             completion(false, "Reference recording file URL not found")
             return
         }
-        
+
         print("Stopped reference recording, file saved at \(fileURL.path)")
-        self.referenceAudioURL = fileURL
-        // Transcribe the recorded reference audio.
-        // In your stopReferenceRecording(...) method’s completion block:
-        self.transcribeAudioFile(url: fileURL) { transcription in
+
+        // First, validate and convert the recorded audio.
+        self.validateAndConvertReferenceAudio(url: fileURL) { result in
             DispatchQueue.main.async {
-                if transcription.isEmpty {
-                    completion(false, "No speech detected in your recording. Please try again.")
-                } else {
-                    self.referenceAudioText = transcription
-                    // Validate (and convert) the recorded audio.
-                    self.validateAndConvertReferenceAudio(url: fileURL) { result in
+                switch result {
+                case .success(let convertedURL):
+                    // Update the reference audio URL to the converted file.
+                    self.referenceAudioURL = convertedURL
+                    // Now transcribe the converted audio.
+                    self.transcribeAudioFile(url: convertedURL) { transcription in
                         DispatchQueue.main.async {
-                            switch result {
-                            case .success(let convertedURL):
-                                self.referenceAudioURL = convertedURL
+                            if transcription.isEmpty {
+                                completion(false, "No speech detected in your recording. Please try again.")
+                            } else {
+                                self.referenceAudioText = transcription
                                 completion(true, "Your own voice will be used to generate speech for the text you provided.")
-                            case .failure(let error):
-                                completion(false, error.localizedDescription)
                             }
                         }
                     }
+                case .failure(let error):
+                    completion(false, error.localizedDescription)
                 }
             }
         }
@@ -299,7 +302,11 @@ class F5TTSViewModel: ObservableObject {
             return
         }
         
-        isGenerating = true
+        // Reset progress and mark as generating.
+        DispatchQueue.main.async {
+            self.generationProgress = 0.0
+            self.isGenerating = true
+        }
         
         Task {
             do {
@@ -313,10 +320,19 @@ class F5TTSViewModel: ObservableObject {
                     generatedAudio = try await f5tts.generate(
                         text: self.inputText,
                         referenceAudioURL: refURL,
-                        referenceAudioText: refText
+                        referenceAudioText: refText,
+                        progressHandler: { progress in
+                            DispatchQueue.main.async {
+                                self.generationProgress = progress
+                            }
+                        }
                     )
                 } else {
-                    generatedAudio = try await f5tts.generate(text: self.inputText)
+                    generatedAudio = try await f5tts.generate(text: self.inputText, progressHandler: { progress in
+                        DispatchQueue.main.async {
+                            self.generationProgress = progress
+                        }
+                    })
                 }
                 
                 let elapsedTime = Date().timeIntervalSince(startTime)
@@ -424,4 +440,19 @@ class F5TTSViewModel: ObservableObject {
         }
     }
     
+}
+
+/// Preprocessing the Input Text
+// In your view model (or wherever you set up the text input), add a helper to “clean” the text before saving or using it:
+// Then use cleanedInputText when calling your speech generation function and when saving the history item.
+extension F5TTSViewModel {
+    var cleanedInputText: String {
+        // Trim leading/trailing whitespace and newlines.
+        let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Replace multiple newlines with a single newline.
+        let regex = try? NSRegularExpression(pattern: "\n+", options: [])
+        let range = NSRange(location: 0, length: trimmed.utf16.count)
+        let cleaned = regex?.stringByReplacingMatches(in: trimmed, options: [], range: range, withTemplate: "\n") ?? trimmed
+        return cleaned
+    }
 }

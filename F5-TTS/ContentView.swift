@@ -16,6 +16,10 @@ struct ContentView: View {
     @State private var showAlert = false
     @State private var alertMessage = ""
     
+    // For the "Show full text" sheet using context menu.
+    @State private var selectedAudioHistoryItem: AudioHistoryItem?
+    @State private var isShowingFullTextSheet = false
+    
     @FocusState private var inputTextFieldIsFocused: Bool
 
     var body: some View {
@@ -207,16 +211,20 @@ struct ContentView: View {
                     
                     // Show a progress view below the "Generate Speech" button while generating
                     if viewModel.isGenerating {
-                        ProgressView("Generating Speech...")
-                            .padding()
-                            .allowsHitTesting(false)
+                        ProgressView(value: viewModel.generationProgress, total: 1.0) {
+                            // You can either show a custom label or nothing.
+                            Text("Generating Speech... \(Int(viewModel.generationProgress * 100))%")
+                                .font(.headline)
+                        }
+                        .padding()
+                        // Allow touches to pass through if you want users to still interact with other UI elements.
+                        .allowsHitTesting(false)
                     }
                     
                     // Audio History List
                     List {
                         ForEach(viewModel.audioHistory) { item in
                             HStack {
-                                // Display only one line of text in the row.
                                 Text(item.title)
                                     .lineLimit(1)
                                     .truncationMode(.tail)
@@ -224,15 +232,16 @@ struct ContentView: View {
                                 Image(systemName: audioHistoryManager.currentlyPlayingId == item.id ?
                                       "stop.circle.fill" : "play.circle.fill")
                             }
-                            .contentShape(Rectangle()) // Makes the entire row tappable.
+                            .contentShape(Rectangle()) // Entire row tappable.
                             .onTapGesture {
+                                // Tapping a row always plays/stops the audio, even if speech is being generated.
                                 if audioHistoryManager.currentlyPlayingId == item.id {
                                     audioHistoryManager.stopCurrentAudio()
                                 } else {
                                     audioHistoryManager.playAudio(fileName: item.audioFileName, itemId: item.id)
                                 }
                             }
-                            // Enable left-swipe deletion.
+                            // Left-swipe deletion.
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) {
                                     viewModel.deleteAudioHistory(item: item)
@@ -240,8 +249,25 @@ struct ContentView: View {
                                     Label("Delete", systemImage: "trash")
                                 }
                             }
-                            // Use a context menu with a preview.
+                            // Context Menu with Preview.
                             .contextMenu {
+                                // Quick action: Copy full text.
+                                Button {
+                                    UIPasteboard.general.string = item.title
+                                } label: {
+                                    Label("Copy", systemImage: "doc.on.doc")
+                                }
+                                // Quick action: Show full text.
+                                Button {
+                                    // Instead of directly setting a string,
+                                    // assign the selected item so the sheet can show its content.
+                                    DispatchQueue.main.async {
+                                        selectedAudioHistoryItem = item
+                                        isShowingFullTextSheet = true
+                                    }
+                                } label: {
+                                    Label("Show", systemImage: "eye")
+                                }
                                 // Quick action: Delete.
                                 Button(role: .destructive) {
                                     viewModel.deleteAudioHistory(item: item)
@@ -249,7 +275,7 @@ struct ContentView: View {
                                     Label("Delete", systemImage: "trash")
                                 }
                             } preview: {
-                                // Force a fixed, wider preview view that displays the full text.
+                                // Force a fixed-size preview that shows the full text.
                                 VStack(alignment: .leading) {
                                     ScrollView {
                                         Text(item.title)
@@ -258,7 +284,7 @@ struct ContentView: View {
                                             .padding()
                                     }
                                 }
-                                .frame(width: 350, height: 300) // Adjust these numbers as needed.
+                                .frame(width: 350, height: 300)
                                 .background(
                                     RoundedRectangle(cornerRadius: 12)
                                         .fill(Color(.systemBackground))
@@ -279,13 +305,34 @@ struct ContentView: View {
                     dismissButton: .default(Text("OK"))
                 )
             }
-        }
+        } // NavigationView
         .onAppear {
             viewModel.initializeF5TTS()
             viewModel.requestPermissions()
         }
         .onDisappear {
             audioHistoryManager.stopCurrentAudio()
+        }
+        // Sheet for showing full text in a scrollable view.
+        .sheet(isPresented: $isShowingFullTextSheet) {
+            NavigationView {
+                ScrollView {
+                    Text(selectedAudioHistoryItem?.title ?? "")
+                        .padding()
+                        .font(.body)
+                        .multilineTextAlignment(.leading)
+                }
+                .navigationTitle("Full Text")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") {
+                            isShowingFullTextSheet = false
+                            selectedAudioHistoryItem = nil
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -314,14 +361,22 @@ class AudioHistoryManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
     
     func playAudio(fileName: String, itemId: UUID) {
-        // Stop current audio if playing
+        // First, stop any current playback.
         stopCurrentAudio()
+        
+        // Before starting playback, reconfigure the audio session for playback.
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default)
+            try session.setActive(true)
+        } catch {
+            print("Failed to reconfigure audio session for playback: \(error)")
+        }
         
         let fileURL = getDocumentsDirectory().appendingPathComponent(fileName)
         print("Attempting to play audio from: \(fileURL)")
         
         do {
-            // Verify file exists
             guard FileManager.default.fileExists(atPath: fileURL.path) else {
                 print("Audio file doesn't exist at path: \(fileURL.path)")
                 return
@@ -335,16 +390,11 @@ class AudioHistoryManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 return
             }
             
-            if player.prepareToPlay() {
-                print("Audio prepared successfully")
-                if player.play() {
-                    print("Audio started playing")
-                    currentlyPlayingId = itemId
-                } else {
-                    print("Failed to start audio playback")
-                }
+            if player.prepareToPlay(), player.play() {
+                print("Audio started playing")
+                currentlyPlayingId = itemId
             } else {
-                print("Failed to prepare audio")
+                print("Failed to start audio playback")
             }
         } catch {
             print("Error playing audio: \(error.localizedDescription)")
@@ -365,6 +415,7 @@ class AudioHistoryManager: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
     }
 }
+
 
 extension UIApplication {
     func endEditing() {
