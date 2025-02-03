@@ -385,6 +385,24 @@ class F5TTSViewModel: ObservableObject {
         }
     }
     
+    func deleteAudioHistory(item: AudioHistoryItem) {
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let fileURL = documentsPath.appendingPathComponent(item.audioFileName)
+        do {
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+        } catch {
+            print("Error deleting file: \(error)")
+        }
+        
+        if let index = audioHistory.firstIndex(where: { $0.id == item.id }) {
+            audioHistory.remove(at: index)
+            saveAudioHistory()
+        }
+    }
+
+    
     // Simplified transcription function
     func transcribeAudioFile(url: URL, completion: @escaping (String) -> Void) {
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")) else {

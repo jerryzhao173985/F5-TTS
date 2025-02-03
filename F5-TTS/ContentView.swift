@@ -213,23 +213,62 @@ struct ContentView: View {
                     }
                     
                     // Audio History List
-                    List(viewModel.audioHistory) { item in
-                        Button(action: {
-                            if audioHistoryManager.currentlyPlayingId == item.id {
-                                audioHistoryManager.stopCurrentAudio()
-                            } else {
-                                audioHistoryManager.playAudio(fileName: item.audioFileName, itemId: item.id)
-                            }
-                        }) {
+                    List {
+                        ForEach(viewModel.audioHistory) { item in
                             HStack {
+                                // Display only one line of text in the row.
                                 Text(item.title)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
                                 Spacer()
                                 Image(systemName: audioHistoryManager.currentlyPlayingId == item.id ?
                                       "stop.circle.fill" : "play.circle.fill")
                             }
+                            .contentShape(Rectangle()) // Makes the entire row tappable.
+                            .onTapGesture {
+                                if audioHistoryManager.currentlyPlayingId == item.id {
+                                    audioHistoryManager.stopCurrentAudio()
+                                } else {
+                                    audioHistoryManager.playAudio(fileName: item.audioFileName, itemId: item.id)
+                                }
+                            }
+                            // Enable left-swipe deletion.
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    viewModel.deleteAudioHistory(item: item)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                            // Use a context menu with a preview.
+                            .contextMenu {
+                                // Quick action: Delete.
+                                Button(role: .destructive) {
+                                    viewModel.deleteAudioHistory(item: item)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            } preview: {
+                                // Force a fixed, wider preview view that displays the full text.
+                                VStack(alignment: .leading) {
+                                    ScrollView {
+                                        Text(item.title)
+                                            .font(.body)
+                                            .multilineTextAlignment(.leading)
+                                            .padding()
+                                    }
+                                }
+                                .frame(width: 350, height: 300) // Adjust these numbers as needed.
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(Color(.systemBackground))
+                                        .shadow(radius: 4)
+                                )
+                            }
                         }
                     }
-                    .frame(maxHeight: 600) // Limit height to make it scrollable
+                    .frame(maxHeight: 600)
+
                 }
             }
             .navigationTitle("F5 TTS App")
